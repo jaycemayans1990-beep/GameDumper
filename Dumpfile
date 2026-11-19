@@ -1,0 +1,1064 @@
+-- ============================================================
+-- Part 1/3: Config + Utility + Script Extraction + Dump & Save Engine
+-- GameDumper.lua
+-- ============================================================
+
+-- ============================================================
+-- CONFIG
+-- ============================================================
+local CONFIG = {
+    saveRoot = "GameDumps",              -- root folder in executor workspace
+    depthLimit = 12,                     -- max recursion depth
+    instanceLimit = 80000,               -- bail after this many instances
+    yieldEvery = 200,                    -- yield to engine every N instances
+    scriptExtensions = {                 -- dump source for these class names
+        Script = true,
+        LocalScript = true,
+        ModuleScript = true,
+    },
+    services = {                         -- services to traverse
+        "Workspace",
+        "ReplicatedStorage",
+        "ReplicatedFirst",
+        "ServerStorage",
+        "ServerScriptService",
+        "StarterGui",
+        "StarterPack",
+        "StarterPlayer",
+        "Players",
+        "Lighting",
+        "SoundService",
+        "Chat",
+        "Teams",
+        "TextChatService",
+        "HttpService",
+        "MarketplaceService",
+        "MessagingService",
+        "RunService",
+        "TweenService",
+        "CollectionService",
+        "ContextActionService",
+        "DataStoreService",
+        "InsertService",
+        "JointsService",
+        "PathfindingService",
+        "PhysicsService",
+        "TeleportService",
+        "UserInputService",
+        "VRService",
+    },
+    -- properties to include per ClassName (nil = name+class only)
+    propSets = {
+        BasePart = { "Position", "Size", "Color", "Material", "Transparency",
+                     "CanCollide", "Anchored", "Massless", "Locked",
+                     "Reflectance", "CastShadow" },
+        Script = { "Source", "Disabled", "RunContext" },
+        LocalScript = { "Source", "Disabled", "RunContext" },
+        ModuleScript = { "Source", "Archivable" },
+        ScreenGui = { "Enabled", "ResetOnSpawn", "ZIndexBehavior" },
+        TextLabel = { "Text", "Font", "TextSize", "TextColor3", "BackgroundTransparency" },
+        TextButton = { "Text", "Font", "TextSize", "TextColor3", "BackgroundColor3" },
+        ImageLabel = { "Image", "BackgroundTransparency", "ScaleType" },
+        Frame = { "BackgroundColor3", "BackgroundTransparency", "Size" },
+        Sound = { "SoundId", "Volume", "Looped", "Playing" },
+        Animation = { "AnimationId" },
+        MeshPart = { "MeshId", "TextureID", "Position", "Size" },
+        Humanoid = { "Health", "MaxHealth", "WalkSpeed", "JumpPower" },
+        Tool = { "ToolTip", "CanBeDropped", "RequiresHandle" },
+    },
+}
+
+-- ============================================================
+-- UTILITY
+-- ============================================================
+local function safe(fn, ...)
+    local ok, res = pcall(fn, ...)
+    if ok then return res end
+    return nil
+end
+
+local function tryGet(inst, prop)
+    return safe(function() return inst[prop] end)
+end
+
+local function fmtVal(v)
+    local t = typeof(v)
+    if t == "string" then
+        local s = v:gsub("\n", "\\n"):gsub("\r", "\\r")
+        if #s > 120 then s = s:sub(1, 120) .. "…" end
+        return ('"%s"'):format(s)
+    elseif t == "Vector3" then
+        return ("Vector3(%.2f, %.2f, %.2f)"):format(v.X, v.Y, v.Z)
+    elseif t == "Vector2" then
+        return ("Vector2(%.2f, %.2f)"):format(v.X, v.Y)
+    elseif t == "CFrame" then
+        return ("CFrame(%.2f, %.2f, %.2f)"):format(v.X, v.Y, v.Z)
+    elseif t == "Color3" then
+        return ("Color3(%d,%d,%d)"):format(math.floor(v.R*255), math.floor(v.G*255), math.floor(v.B*255))
+    elseif t == "boolean" or t == "number" then
+        return tostring(v)
+    elseif t == "Instance" then
+        return ("→%s.%s"):format(v.ClassName, v.Name)
+    elseif t == "EnumItem" then
+        return tostring(v)
+    else
+        return ("<%s>"):format(t)
+    end
+end
+
+-- ============================================================
+-- SCRIPT SOURCE EXTRACTION
+-- ============================================================
+local function getScriptSource(scriptInst)
+    local src = safe(function() return scriptInst.Source end)
+    if src and #src > 0 then return src end
+
+    local decompile = getgenv and getgenv().decompile or decompile
+    if decompile then
+        src = safe(decompile, scriptInst)
+        if src and #src > 0 then return src end
+    end
+
+    local gsc = getgenv and getgenv().getscriptclosure or getscriptclosure
+    if gsc then
+        local f = safe(gsc, scriptInst)
+        if f and type(f) == "function" then
+            local info = safe(debug.getinfo, f, 1)
+            if info and info.source then
+                return info.source
+            end
+        end
+    end
+
+    return nil
+end
+
+-- ============================================================
+-- DUMP ENGINE
+-- ============================================================
+local DumpState = {
+    totalInstances = 0,
+    totalScripts = 0,
+    scriptSources = {},
+    treeLines = {},
+    propLines = {},
+    cancelled = false,
+    startTime = 0,
+    currentPath = "",
+}
+
+local TREE_INDENT = "│   "
+local TREE_BRANCH = "├── "
+local TREE_LAST   = "└── "
+local TREE_SPACE  = "    "
+
+local function buildTreePrefix(depths, isLast)
+    local parts = {}
+    for i = 1, #depths - 1 do
+        parts[i] = depths[i] and TREE_SPACE or TREE_INDENT
+    end
+    if #depths > 0 then
+        parts[#depths] = isLast and TREE_LAST or TREE_BRANCH
+    end
+    return table.concat(parts)
+end
+
+local function walkInstance(inst, depth, depths, path, onProgress)
+    if DumpState.cancelled then return end
+    if depth > CONFIG.depthLimit then return end
+    if DumpState.totalInstances >= CONFIG.instanceLimit then return end
+
+    DumpState.totalInstances = DumpState.totalInstances + 1
+    DumpState.currentPath = path
+
+    if DumpState.totalInstances % CONFIG.yieldEvery == 0 then
+        if onProgress then onProgress(DumpState.totalInstances, path) end
+        task.wait()
+    end
+
+    local className = safe(function() return inst.ClassName end) or "???"
+    local name = safe(function() return inst.Name end) or "???"
+
+    local prefix = buildTreePrefix(depths, false)
+    local treeLine = ("%s%s [%s]"):format(prefix, name, className)
+    table.insert(DumpState.treeLines, treeLine)
+
+    local propSet = CONFIG.propSets[className]
+    if propSet then
+        local props = {}
+        for _, pn in ipairs(propSet) do
+            local v = tryGet(inst, pn)
+            if v ~= nil then
+                props[#props + 1] = ("  %s = %s"):format(pn, fmtVal(v))
+            end
+        end
+        if #props > 0 then
+            for _, pl in ipairs(props) do
+                table.insert(DumpState.treeLines, prefix .. TREE_SPACE .. pl)
+            end
+        end
+    end
+
+    if CONFIG.scriptExtensions[className] then
+        DumpState.totalScripts = DumpState.totalScripts + 1
+        local src = getScriptSource(inst)
+        if src then
+            local scriptPath = path .. "." .. className
+            DumpState.scriptSources[scriptPath] = {
+                name = name,
+                class = className,
+                path = path,
+                source = src,
+            }
+        end
+    end
+
+    local children = safe(function() return inst:GetChildren() end)
+    if children then
+        for i, child in ipairs(children) do
+            local childDepths = { table.unpack(depths) }
+            childDepths[#childDepths + 1] = (i == #children)
+            local childPath = path .. "/" .. (safe(function() return child.Name end) or "???")
+            walkInstance(child, depth + 1, childDepths, childPath, onProgress)
+        end
+    end
+end
+
+local function runDump(selectedServices, onProgress, onDone)
+    DumpState.totalInstances = 0
+    DumpState.totalScripts = 0
+    DumpState.scriptSources = {}
+    DumpState.treeLines = {}
+    DumpState.propLines = {}
+    DumpState.cancelled = false
+    DumpState.startTime = os.clock()
+
+    task.spawn(function()
+        for _, svcName in ipairs(selectedServices) do
+            if DumpState.cancelled then break end
+            local svc = safe(game.GetService, game, svcName)
+            if svc then
+                local prefix = ("[%s]"):format(svcName)
+                table.insert(DumpState.treeLines, prefix)
+                walkInstance(svc, 0, {}, svcName, onProgress)
+            else
+                table.insert(DumpState.treeLines, ("[%s] (inaccessible)"):format(svcName))
+            end
+        end
+
+        local elapsed = os.clock() - DumpState.startTime
+        if onDone then
+            onDone({
+                instances = DumpState.totalInstances,
+                scripts = DumpState.totalScripts,
+                sources = DumpState.scriptSources,
+                tree = table.concat(DumpState.treeLines, "\n"),
+                elapsed = elapsed,
+                cancelled = DumpState.cancelled,
+            })
+        end
+    end)
+end
+
+-- ============================================================
+-- SAVE ENGINE
+-- ============================================================
+local function ensureDir(path)
+    if makefolder then
+        safe(makefolder, path)
+    end
+end
+
+local function saveDump(results, folderName, format)
+    local ts = os.date("%Y%m%d_%H%M%S")
+    local base = CONFIG.saveRoot .. "/" .. folderName .. "_" .. ts
+    ensureDir(CONFIG.saveRoot)
+    ensureDir(base)
+
+    local filesSaved = {}
+
+    local treePath = base .. "/_tree.txt"
+    local treeContent = ("-- Game Dump: %s\n-- Date: %s\n-- Instances: %d | Scripts: %d | Elapsed: %.2fs\n-- Cancelled: %s\n\n%s"):format(
+        safe(function() return game.Name end) or "???",
+        os.date("%Y-%m-%d %H:%M:%S"),
+        results.instances,
+        results.scripts,
+        results.elapsed,
+        tostring(results.cancelled),
+        results.tree
+    )
+    safe(writefile, treePath, treeContent)
+    filesSaved[#filesSaved + 1] = treePath
+
+    if results.sources and next(results.sources) then
+        local scriptsDir = base .. "/scripts"
+        ensureDir(scriptsDir)
+
+        local byService = {}
+        for pathKey, data in pairs(results.sources) do
+            local svc = data.path:match("^([^/]+)") or "_root"
+            if not byService[svc] then byService[svc] = {} end
+            byService[svc][#byService[svc] + 1] = data
+        end
+
+        for svc, scripts in pairs(byService) do
+            local svcDir = scriptsDir .. "/" .. svc:gsub("[<>:\"/\\|?*]", "_")
+            ensureDir(svcDir)
+
+            for _, sdata in ipairs(scripts) do
+                local relPath = sdata.path:gsub("^" .. svc .. "/", "")
+                local fileName = relPath:gsub("[<>:\"/\\|?*]", "_") .. ".lua"
+                local filePath = svcDir .. "/" .. fileName
+
+                local header = ("--[[\n  Path: %s\n  Class: %s\n  Name: %s\n]]\n\n"):format(
+                    sdata.path, sdata.class, sdata.name
+                )
+                safe(writefile, filePath, header .. sdata.source)
+                filesSaved[#filesSaved + 1] = filePath
+            end
+
+            local idx = {}
+            for _, sdata in ipairs(scripts) do
+                idx[#idx + 1] = ("%s :: %s [%s]"):format(sdata.path, sdata.name, sdata.class)
+            end
+            safe(writefile, svcDir .. "/_index.txt", table.concat(idx, "\n"))
+        end
+    end
+
+    local summaryPath = base .. "/_summary.txt"
+    local summary = ("GameDumper Summary\n==================\nGame: %s\nPlaceId: %s\nDate: %s\nElapsed: %.2fs\nInstances: %d\nScripts: %d\nSources Extracted: %d\nFiles Saved: %d\n\nFiles:\n%s"):format(
+        safe(function() return game.Name end) or "???",
+        safe(function() return game.PlaceId end) or "???",
+        os.date("%Y-%m-%d %H:%M:%S"),
+        results.elapsed,
+        results.instances,
+        results.scripts,
+        results.sources and table.maxn(results.sources) or 0,
+        #filesSaved,
+        table.concat(filesSaved, "\n")
+    )
+    safe(writefile, summaryPath, summary)
+    filesSaved[#filesSaved + 1] = summaryPath
+
+    return {
+        base = base,
+        files = filesSaved,
+        summary = summaryPath,
+    }
+end
+-- ============================================================
+-- Part 2/3: Remote Spy Engine (Hooks + Scanner + Log Saver)
+-- GameDumper.lua (ต้องมี Part 1/3 รันก่อน: safe, ensureDir)
+-- ============================================================
+
+local RemoteSpy = {
+    enabled = false,
+    logLines = {},
+    entries = {},
+    maxEntries = 5000,
+    hooked = {},
+    nameCache = {},
+}
+
+local function fmtArg(v, depth)
+    depth = depth or 0
+    if depth > 3 then return "…" end
+    local t = typeof(v)
+    if t == "string" then
+        local s = v:gsub("\n", "\\n"):gsub("\r", "\\r")
+        if #s > 200 then s = s:sub(1, 200) .. "…" end
+        return ('"%s"'):format(s)
+    elseif t == "number" or t == "boolean" then
+        return tostring(v)
+    elseif t == "Vector3" then
+        return ("Vector3(%.2f,%.2f,%.2f)"):format(v.X, v.Y, v.Z)
+    elseif t == "Vector2" then
+        return ("Vector2(%.2f,%.2f)"):format(v.X, v.Y)
+    elseif t == "CFrame" then
+        return ("CFrame(%.2f,%.2f,%.2f)"):format(v.X, v.Y, v.Z)
+    elseif t == "Color3" then
+        return ("Color3(%d,%d,%d)"):format(math.floor(v.R*255), math.floor(v.G*255), math.floor(v.B*255))
+    elseif t == "Instance" then
+        return ("→%s.%s"):format(v.ClassName, v.Name)
+    elseif t == "EnumItem" then
+        return tostring(v)
+    elseif t == "table" then
+        local parts = {}
+        local i = 0
+        for k, val in pairs(v) do
+            i = i + 1
+            if i > 8 then parts[#parts+1] = "…"; break end
+            parts[#parts+1] = ("%s=%s"):format(tostring(k), fmtArg(val, depth+1))
+        end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    else
+        return ("<%s>"):format(t)
+    end
+end
+
+local function fmtStack()
+    local levels = {}
+    for i = 2, 12 do
+        local info = safe(debug.getinfo, i, "Sln")
+        if not info then break end
+        local src = info.source or "?"
+        local line = info.currentline or info.linedefined or 0
+        local func = info.name or ""
+        levels[#levels+1] = ("  #%d %s:%d %s"):format(i-1, src, line, func)
+    end
+    return table.concat(levels, "\n")
+end
+
+local function remotePath(remote)
+    local cached = RemoteSpy.nameCache[remote]
+    if cached then return cached end
+
+    local path = safe(function() return remote.Name end) or "?"
+    local parent = safe(function() return remote.Parent end)
+    local hops = 0
+    while parent and parent ~= game and hops < 12 do
+        path = (safe(function() return parent.Name end) or "?") .. "." .. path
+        parent = safe(function() return parent.Parent end)
+        hops = hops + 1
+    end
+    if parent == game then
+        path = "game." .. path
+    end
+    RemoteSpy.nameCache[remote] = path
+    return path
+end
+
+local function spyLog(kind, remote, args, retVals, callTime, extra)
+    if not RemoteSpy.enabled then return end
+
+    local path = remotePath(remote)
+    local ts = os.date("%H:%M:%S")
+    local line = ("[%s] %s %s"):format(ts, kind, path)
+
+    if args and #args > 0 then
+        local argParts = {}
+        for i, a in ipairs(args) do
+            argParts[#argParts+1] = ("  arg[%d] = %s"):format(i, fmtArg(a))
+        end
+        line = line .. "\n" .. table.concat(argParts, "\n")
+    end
+
+    if retVals and #retVals > 0 then
+        local retParts = {}
+        for i, r in ipairs(retVals) do
+            retParts[#retParts+1] = ("  ret[%d] = %s"):format(i, fmtArg(r))
+        end
+        line = line .. "\n" .. table.concat(retParts, "\n")
+    end
+
+    if extra then
+        line = line .. "\n" .. extra
+    end
+
+    RemoteSpy.logLines[#RemoteSpy.logLines + 1] = line
+    RemoteSpy.entries[#RemoteSpy.entries + 1] = {
+        time = os.clock(),
+        stamp = ts,
+        kind = kind,
+        path = path,
+        args = args,
+        returns = retVals,
+    }
+
+    if #RemoteSpy.logLines > RemoteSpy.maxEntries then
+        table.remove(RemoteSpy.logLines, 1)
+    end
+    if #RemoteSpy.entries > RemoteSpy.maxEntries then
+        table.remove(RemoteSpy.entries, 1)
+    end
+end
+
+local function hookRemote(remote)
+    if RemoteSpy.hooked[remote] then return end
+    RemoteSpy.hooked[remote] = true
+
+    local isRemoteEvent = remote.ClassName == "RemoteEvent"
+    local isRemoteFunction = remote.ClassName == "RemoteFunction"
+
+    if isRemoteEvent then
+        if remote.FireServer then
+            local oldFire = remote.FireServer
+            remote.FireServer = function(...)
+                local args = { ... }
+                local t0 = os.clock()
+                spyLog("FIRESERVER", remote, args, nil, t0, nil)
+                local ok, err = pcall(oldFire, remote, unpack(args))
+                if not ok then
+                    spyLog("FIRESERVER-ERR", remote, nil, nil, t0, "  error: " .. tostring(err))
+                end
+                return unpack(args)
+            end
+        end
+        if remote.FireClient then
+            local oldFire = remote.FireClient
+            remote.FireClient = function(...)
+                local args = { ... }
+                local t0 = os.clock()
+                spyLog("FIRECLIENT", remote, args, nil, t0, nil)
+                local ok, err = pcall(oldFire, remote, unpack(args))
+                if not ok then
+                    spyLog("FIRECLIENT-ERR", remote, nil, nil, t0, "  error: " .. tostring(err))
+                end
+                return unpack(args)
+            end
+        end
+        if remote.OnClientEvent and remote.OnClientEvent.Connect then
+            local oldConnect = remote.OnClientEvent.Connect
+            remote.OnClientEvent.Connect = function(self, cb)
+                local wrapped = function(...)
+                    local args = { ... }
+                    local t0 = os.clock()
+                    spyLog("ONCLIENTEVENT", remote, args, nil, t0, nil)
+                    return cb(...)
+                end
+                return oldConnect(self, wrapped)
+            end
+        end
+    elseif isRemoteFunction then
+        if remote.InvokeServer then
+            local oldInvoke = remote.InvokeServer
+            remote.InvokeServer = function(...)
+                local args = { ... }
+                local t0 = os.clock()
+                local results = { oldInvoke(remote, unpack(args)) }
+                spyLog("INVOKESERVER", remote, args, results, t0, nil)
+                return unpack(results)
+            end
+        end
+        if remote.InvokeClient then
+            local oldInvoke = remote.InvokeClient
+            remote.InvokeClient = function(...)
+                local args = { ... }
+                local t0 = os.clock()
+                local results = { oldInvoke(remote, unpack(args)) }
+                spyLog("INVOKECLIENT", remote, args, results, t0, nil)
+                return unpack(results)
+            end
+        end
+        if remote.OnClientInvoke and remote.OnClientInvoke.Connect then
+            local oldConnect = remote.OnClientInvoke.Connect
+            remote.OnClientInvoke.Connect = function(self, cb)
+                local wrapped = function(...)
+                    local args = { ... }
+                    local t0 = os.clock()
+                    local results = { cb(...) }
+                    spyLog("ONCLIENTINVOKE", remote, args, results, t0, nil)
+                    return unpack(results)
+                end
+                return oldConnect(self, wrapped)
+            end
+        end
+    end
+end
+
+local function findAndHookRemotes(root, depth)
+    if depth > 8 then return end
+    if RemoteSpy.enabled == false then return end
+    local children = safe(function() return root:GetChildren() end)
+    if not children then return end
+    for _, child in ipairs(children) do
+        local cn = safe(function() return child.ClassName end)
+        if cn == "RemoteEvent" or cn == "RemoteFunction" then
+            hookRemote(child)
+        end
+        local cc = safe(function() return child:GetChildren() end)
+        if cc and #cc > 0 then
+            findAndHookRemotes(child, depth + 1)
+        end
+    end
+end
+
+local function scanRemotes()
+    local roots = {
+        safe(function() return game:GetService("ReplicatedStorage") end),
+        safe(function() return game:GetService("ReplicatedFirst") end),
+        safe(function() return game:GetService("Players") end),
+        safe(function() return game:GetService("Workspace") end),
+        safe(function() return game:GetService("StarterGui") end),
+        safe(function() return game:GetService("StarterPack") end),
+        safe(function() return game:GetService("StarterPlayer") end),
+    }
+    for _, root in ipairs(roots) do
+        if root then
+            findAndHookRemotes(root, 0)
+        end
+    end
+end
+
+local function startRemoteSpy()
+    RemoteSpy.enabled = true
+    scanRemotes()
+
+    local function watchContainer(root)
+        local dc = safe(function() return root.DescendantAdded end)
+        if dc and dc.Connect then
+            dc:Connect(function(desc)
+                local cn = safe(function() return desc.ClassName end)
+                if cn == "RemoteEvent" or cn == "RemoteFunction" then
+                    hookRemote(desc)
+                end
+            end)
+        end
+    end
+    watchContainer(safe(function() return game:GetService("ReplicatedStorage") end))
+    watchContainer(safe(function() return game:GetService("ReplicatedFirst") end))
+    watchContainer(safe(function() return game:GetService("Players") end))
+    watchContainer(safe(function() return game:GetService("Workspace") end))
+
+    return RemoteSpy
+end
+
+local function stopRemoteSpy()
+    RemoteSpy.enabled = false
+end
+
+local function clearRemoteSpy()
+    RemoteSpy.logLines = {}
+    RemoteSpy.entries = {}
+end
+
+local function getRemoteSpyLog()
+    return table.concat(RemoteSpy.logLines, "\n")
+end
+
+local function saveRemoteSpyLog(basePath)
+    local log = getRemoteSpyLog()
+    if #log == 0 then return nil end
+
+    ensureDir(basePath .. "/remote")
+    local ts = os.date("%Y%m%d_%H%M%S")
+    local path = basePath .. "/remote/remote_spy.txt"
+    local header = ("-- Remote Spy Log\n-- Game: %s\n-- Entries: %d\n-- Captured: %s\n\n%s"):format(
+        safe(function() return game.Name end) or "???",
+        #RemoteSpy.entries,
+        os.date("%Y-%m-%d %H:%M:%S"),
+        log
+    )
+    safe(writefile, path, header)
+    return path
+end
+-- ============================================================
+-- Part 3/3: Rayfield UI (Dump Tab + Settings Tab + Remote Spy Tab + Log Tab)
+-- GameDumper.lua (ต้องมี Part 1/3 และ 2/3 รันก่อน)
+-- ============================================================
+
+local function loadRayfield()
+    local urls = {
+        "https://raw.githubusercontent.com/shlexware/Rayfield/main/source",
+        "https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/main/source",
+        "https://raw.githubusercontent.com/UI-Libraries/Rayfield/main/source",
+    }
+
+    for _, url in ipairs(urls) do
+        local ok, result = pcall(function()
+            return loadstring(game:HttpGet(url))()
+        end)
+        if ok and result and type(result.CreateWindow) == "function" then
+            return result
+        end
+    end
+    return nil
+end
+
+local Rayfield = loadRayfield()
+
+if not Rayfield then
+    warn("[GameDumper] Rayfield not available — running console mode")
+    warn("[GameDumper] Dumping all services with default settings...")
+
+    local svcList = {}
+    for _, name in ipairs(CONFIG.services) do
+        svcList[#svcList + 1] = name
+    end
+
+    runDump(svcList, function(count, path)
+        if count % 2000 == 0 then
+            print(("[GameDumper] %d instances scanned — %s"):format(count, path))
+        end
+    end, function(results)
+        local save = saveDump(results, game.Name or "dump", "full")
+        print(("[GameDumper] Done! %d instances, %d scripts in %.2fs"):format(
+            results.instances, results.scripts, results.elapsed))
+        print(("[GameDumper] Saved to: %s"):format(save.base))
+        print(("[GameDumper] Summary: %s"):format(save.summary))
+    end)
+    return
+end
+
+-- ============================================================
+-- MAIN UI
+-- ============================================================
+local Window = Rayfield:CreateWindow({
+    Name = "Game Dumper v1.0",
+    LoadingTitle = "Game Dumper",
+    LoadingSubtitle = "by NULL",
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "GameDumper",
+        FileName = "Config"
+    },
+    Discord = { Enabled = false },
+    KeySystem = false,
+})
+
+local TabDump = Window:CreateTab("Dump")
+local TabRemote = Window:CreateTab("Remote Spy")
+local TabSettings = Window:CreateTab("Settings")
+local TabLog = Window:CreateTab("Log")
+
+local UIState = {
+    selectedServices = {},
+    depthLimit = CONFIG.depthLimit,
+    instanceLimit = CONFIG.instanceLimit,
+    dumpScripts = true,
+    dumpTree = true,
+    dumpProps = false,
+    saveSpyLog = true,
+    gameName = safe(function() return game.Name end) or "UnknownGame",
+    isRunning = false,
+    logLines = {},
+}
+
+for _, name in ipairs(CONFIG.services) do
+    UIState.selectedServices[name] = true
+end
+
+local function addLog(msg)
+    UIState.logLines[#UIState.logLines + 1] = ("[%s] %s"):format(os.date("%H:%M:%S"), msg)
+    if #UIState.logLines > 200 then
+        table.remove(UIState.logLines, 1)
+    end
+end
+
+local LogParagraph
+local function refreshLog()
+    if LogParagraph then
+        LogParagraph:Set({
+            Name = "Log",
+            Text = table.concat(UIState.logLines, "\n"),
+        })
+    end
+end
+
+-- ============================================================
+-- DUMP TAB
+-- ============================================================
+TabDump:CreateLabel({ Name = "Target Game: " .. UIState.gameName })
+
+local serviceOptions = {}
+for _, name in ipairs(CONFIG.services) do
+    serviceOptions[#serviceOptions + 1] = name
+end
+
+TabDump:CreateButton({
+    Name = "Select All Services",
+    Callback = function()
+        for _, name in ipairs(CONFIG.services) do
+            UIState.selectedServices[name] = true
+        end
+        addLog("All services selected")
+        refreshLog()
+    end,
+})
+
+TabDump:CreateButton({
+    Name = "Select Core Only",
+    Callback = function()
+        local core = { Workspace=true, ReplicatedStorage=true, ReplicatedFirst=true,
+                       Players=true, Lighting=true, StarterGui=true, StarterPack=true,
+                       StarterPlayer=true, SoundService=true, Chat=true, Teams=true }
+        for _, name in ipairs(CONFIG.services) do
+            UIState.selectedServices[name] = core[name] or false
+        end
+        addLog("Core services selected")
+        refreshLog()
+    end,
+})
+
+TabDump:CreateButton({
+    Name = "Select None",
+    Callback = function()
+        for _, name in ipairs(CONFIG.services) do
+            UIState.selectedServices[name] = false
+        end
+        addLog("All deselected")
+        refreshLog()
+    end,
+})
+
+for _, name in ipairs(CONFIG.services) do
+    TabDump:CreateToggle({
+        Name = name,
+        CurrentValue = true,
+        Callback = function(v)
+            UIState.selectedServices[name] = v
+        end,
+    })
+end
+
+-- ============================================================
+-- SETTINGS TAB
+-- ============================================================
+TabSettings:CreateSlider({
+    Name = "Depth Limit",
+    Range = { 1, 30 },
+    Increment = 1,
+    CurrentValue = CONFIG.depthLimit,
+    Callback = function(v)
+        CONFIG.depthLimit = v
+        UIState.depthLimit = v
+    end,
+})
+
+TabSettings:CreateSlider({
+    Name = "Instance Limit",
+    Range = { 1000, 200000 },
+    Increment = 1000,
+    CurrentValue = CONFIG.instanceLimit,
+    Callback = function(v)
+        CONFIG.instanceLimit = v
+        UIState.instanceLimit = v
+    end,
+})
+
+TabSettings:CreateToggle({
+    Name = "Dump Script Sources",
+    CurrentValue = UIState.dumpScripts,
+    Callback = function(v)
+        UIState.dumpScripts = v
+    end,
+})
+
+TabSettings:CreateToggle({
+    Name = "Dump Instance Tree",
+    CurrentValue = UIState.dumpTree,
+    Callback = function(v)
+        UIState.dumpTree = v
+    end,
+})
+
+TabSettings:CreateToggle({
+    Name = "Dump Properties (slower)",
+    CurrentValue = UIState.dumpProps,
+    Callback = function(v)
+        UIState.dumpProps = v
+    end,
+})
+
+TabSettings:CreateLabel({ Name = "Save Path: workspace/GameDumps/" })
+
+-- ============================================================
+-- START / CANCEL
+-- ============================================================
+local statusLabel = TabDump:CreateLabel({ Name = "Status: Idle" })
+
+TabDump:CreateButton({
+    Name = "⚡ START DUMP",
+    Callback = function()
+        if UIState.isRunning then
+            addLog("Dump already running — cancel first")
+            refreshLog()
+            return
+        end
+
+        local toDump = {}
+        for _, name in ipairs(CONFIG.services) do
+            if UIState.selectedServices[name] then
+                toDump[#toDump + 1] = name
+            end
+        end
+        if #toDump == 0 then
+            addLog("No services selected!")
+            refreshLog()
+            return
+        end
+
+        UIState.isRunning = true
+        statusLabel:Set({ Name = "Status: Running..." })
+        addLog(("Starting dump — %d services, depth=%d, limit=%d"):format(
+            #toDump, CONFIG.depthLimit, CONFIG.instanceLimit))
+        refreshLog()
+
+        local lastUpdate = 0
+        runDump(toDump, function(count, path)
+            local now = os.clock()
+            if now - lastUpdate > 0.3 then
+                lastUpdate = now
+                statusLabel:Set({
+                    Name = ("Status: Scanning... %d instances"):format(count)
+                })
+            end
+        end, function(results)
+            UIState.isRunning = false
+            if results.cancelled then
+                statusLabel:Set({ Name = "Status: Cancelled" })
+                addLog("Dump cancelled")
+                refreshLog()
+                return
+            end
+
+            statusLabel:Set({ Name = "Status: Saving..." })
+            addLog(("Scan done: %d instances, %d scripts in %.1fs"):format(
+                results.instances, results.scripts, results.elapsed))
+            refreshLog()
+
+            local save = saveDump(results, UIState.gameName, "full")
+            addLog(("Saved %d files to: %s"):format(#save.files, save.base))
+            addLog(("Summary: %s"):format(save.summary))
+
+            if UIState.saveSpyLog and RemoteSpy.enabled and #RemoteSpy.entries > 0 then
+                local spyFile = saveRemoteSpyLog(save.base)
+                if spyFile then
+                    addLog(("Spy log saved: %s"):format(spyFile))
+                end
+            end
+
+            statusLabel:Set({
+                Name = ("Status: Done — %d inst / %d scripts / %.1fs"):format(
+                    results.instances, results.scripts, results.elapsed)
+            })
+            refreshLog()
+        end)
+    end,
+})
+
+TabDump:CreateButton({
+    Name = "✕ CANCEL",
+    Callback = function()
+        DumpState.cancelled = true
+        UIState.isRunning = false
+        statusLabel:Set({ Name = "Status: Cancelling..." })
+        addLog("Cancelled by user")
+        refreshLog()
+    end,
+})
+
+-- ============================================================
+-- REMOTE SPY TAB
+-- ============================================================
+local spyStatusLabel = TabRemote:CreateLabel({ Name = "Spy Status: Off" })
+local spyCountLabel = TabRemote:CreateLabel({ Name = "Captured: 0 entries" })
+
+TabRemote:CreateToggle({
+    Name = "Enable Remote Spy",
+    CurrentValue = false,
+    Callback = function(v)
+        if v then
+            startRemoteSpy()
+            spyStatusLabel:Set({ Name = "Spy Status: ● Active" })
+            addLog("Remote Spy started — hooking FireServer/InvokeServer/FireClient")
+        else
+            stopRemoteSpy()
+            spyStatusLabel:Set({ Name = "Spy Status: Off" })
+            addLog("Remote Spy stopped")
+        end
+        refreshLog()
+    end,
+})
+
+TabRemote:CreateButton({
+    Name = "Refresh — Rescan for new Remotes",
+    Callback = function()
+        scanRemotes()
+        local hooked = 0
+        for _ in pairs(RemoteSpy.hooked) do hooked = hooked + 1 end
+        addLog(("Rescanned — %d remotes hooked"):format(hooked))
+        refreshLog()
+    end,
+})
+
+TabRemote:CreateButton({
+    Name = "Clear Spy Log",
+    Callback = function()
+        clearRemoteSpy()
+        spyCountLabel:Set({ Name = "Captured: 0 entries" })
+        addLog("Spy log cleared")
+        refreshLog()
+    end,
+})
+
+TabRemote:CreateButton({
+    Name = "Save Spy Log Now",
+    Callback = function()
+        local base = CONFIG.saveRoot .. "/" .. UIState.gameName .. "_spy_" .. os.date("%Y%m%d_%H%M%S")
+        local saved = saveRemoteSpyLog(base)
+        if saved then
+            addLog(("Spy log saved: %s"):format(saved))
+        else
+            addLog("Spy log empty — nothing to save")
+        end
+        refreshLog()
+    end,
+})
+
+TabRemote:CreateToggle({
+    Name = "Include Spy Log in Dump Save",
+    CurrentValue = UIState.saveSpyLog,
+    Callback = function(v)
+        UIState.saveSpyLog = v
+    end,
+})
+
+TabRemote:CreateLabel({ Name = "Hooks: FireServer · InvokeServer · FireClient · OnClientEvent" })
+TabRemote:CreateLabel({ Name = "Also: InvokeClient · OnClientInvoke (server-side)" })
+TabRemote:CreateLabel({ Name = "Scans: ReplicatedStorage, Players, Workspace, StarterGui, StarterPack" })
+
+local spyLogParagraph = TabRemote:CreateParagraph({
+    Name = "Remote Spy Log",
+    Text = "Spy not started yet.",
+})
+
+local function refreshSpyDisplay()
+    local log = getRemoteSpyLog()
+    if #log == 0 then
+        spyLogParagraph:Set({ Name = "Remote Spy Log", Text = "No remote calls captured yet." })
+    else
+        local lines = RemoteSpy.logLines
+        local start = math.max(1, #lines - 100)
+        local display = {}
+        for i = start, #lines do
+            display[#display+1] = lines[i]
+        end
+        spyLogParagraph:Set({
+            Name = ("Remote Spy Log (%d entries)"):format(#RemoteSpy.entries),
+            Text = table.concat(display, "\n"),
+        })
+    end
+    spyCountLabel:Set({ Name = ("Captured: %d entries"):format(#RemoteSpy.entries) })
+end
+
+task.spawn(function()
+    while true do
+        task.wait(1.5)
+        if RemoteSpy.enabled then
+            safe(refreshSpyDisplay)
+        end
+    end
+end)
+
+-- ============================================================
+-- LOG TAB
+-- ============================================================
+LogParagraph = TabLog:CreateParagraph({
+    Name = "Log",
+    Text = "Ready.",
+})
+
+addLog("GameDumper loaded — " .. UIState.gameName)
+addLog(("Executor: %s"):format(identifyexecutor and identifyexecutor() or "unknown"))
+refreshLog()
+
+-- ============================================================
+-- NOTIFY
+-- ============================================================
+Rayfield:Notify({
+    Title = "Game Dumper",
+    Content = "Loaded — " .. UIState.gameName,
+    Duration = 5,
+    Image = 4483362458,
+})
