@@ -1,12 +1,16 @@
--- language: Lua, target: Delta Executor (Mobile), file: GameDumper_fixed.lua
--- แก้ไข: กันค้าง, เพิ่ม timeout โหลด Rayfield, yield ถี่ขึ้น, เริ่มสแกนเมื่อผู้ใช้เรียกเท่านั้น
+-- language: Lua, target: Delta Executor (Mobile), file: GameDumper_Orion.lua
+-- เปลี่ยน UI จาก Rayfield → Orion Library (เบากว่า, โหลดเร็ว, มี timeout)
+-- + แก้ไข yield ป้องกันเกมค้าง
 
+-- ============================================================
+-- CONFIG
+-- ============================================================
 local CONFIG = {
     saveRoot = "GameDumps",
     depthLimit = 10,
     instanceLimit = 60000,
-    yieldEvery = 10,           -- เพิ่มความถี่
-    yieldTime = 0.01,          -- yield สั้น ๆ
+    yieldEvery = 10,           -- yield ถี่ขึ้น
+    yieldTime = 0.01,
     services = {
         "Workspace", "ReplicatedStorage", "ReplicatedFirst",
         "ServerStorage", "ServerScriptService",
@@ -19,40 +23,37 @@ local CONFIG = {
     maxSourceChars = 50000,
 }
 
--- fallback functions
+-- ============================================================
+-- FALLBACKS
+-- ============================================================
 local gwritefile = writefile or function() end
 local gmakefolder = makefolder or function() end
-local greadfile = readfile or function() return "" end
-local gisfile = isfile or function() return false end
-local gisfolder = isfolder or function() return false end
-local glistfiles = listfiles or function() return {} end
 
--- yield function ที่ปลอดภัย
+-- safe yield (Delta บางรุ่นไม่มี task.wait)
 local function safeYield(seconds)
     local y = (task and task.wait) or wait
     if y then
         y(seconds)
     else
-        -- fallback ถ้าไม่มี wait เลย: ใช้ RunService.Heartbeat
         local rs = game:GetService("RunService")
         local t = os.clock()
         repeat rs.Heartbeat:Wait() until os.clock() - t >= seconds
     end
 end
 
--- pcall แบบสั้น
+-- safe pcall
 local function pc(fn, ...)
     local ok, res = pcall(fn, ...)
     if ok then return res end
     return nil
 end
 
--- ทำความสะอาดชื่อไฟล์
+-- clean filename
 local function cleanName(s)
     return (s:gsub("[<>:\"/\\|?*%c]", "_"):gsub("_+", "_"))
 end
 
--- จัดรูปแบบค่า
+-- format value
 local function fmtVal(v)
     local t = typeof(v)
     if t == "string" then
@@ -80,7 +81,7 @@ local function fmtVal(v)
     end
 end
 
--- เอาซอร์สสคริปต์
+-- get script source
 local function getSource(inst)
     local src = pc(function() return inst.Source end)
     if src and #src > 0 then return src end
@@ -129,7 +130,7 @@ local function walk(inst, depth, depths, path)
 
     Dump.progress.scanned = Dump.progress.scanned + 1
 
-    -- yield ถี่ขึ้น (ทุก 10 instance)
+    -- yield ทุก 10 instance
     if Dump.progress.scanned % CONFIG.yieldEvery == 0 then
         safeYield(CONFIG.yieldTime)
     end
@@ -150,10 +151,7 @@ local function walk(inst, depth, depths, path)
             end
             Dump.progress.scripts = Dump.progress.scripts + 1
             Dump.scripts[#Dump.scripts + 1] = {
-                path = shortPath,
-                name = nm,
-                class = cn,
-                source = src,
+                path = shortPath, name = nm, class = cn, source = src,
             }
             table.insert(Dump.treeBuf, prefix .. TREE.space .. "[SOURCE DUMPED]")
         end
@@ -189,8 +187,7 @@ function Dump.run(services, onTick)
             table.insert(Dump.treeBuf, ("[%s] INACCESSIBLE"):format(svcName))
         end
         if onTick then onTick(Dump.progress) end
-        -- yield หลังจากแต่ละ service เพื่อไม่ให้ค้าง
-        safeYield(0.01)
+        safeYield(0.01) -- yield หลังแต่ละ service
     end
 
     Dump.running = false
@@ -204,7 +201,7 @@ function Dump.run(services, onTick)
 end
 
 -- ============================================================
--- SAVE ENGINE (เหมือนเดิม)
+-- SAVE ENGINE
 -- ============================================================
 local function saveDump(results, gameName)
     local ts = os.date("%Y%m%d_%H%M%S")
@@ -214,6 +211,7 @@ local function saveDump(results, gameName)
 
     local saved = {}
 
+    -- tree
     local treePath = base .. "/_tree.txt"
     local treeHeader = ("-- Game: %s\n-- Date: %s\n-- Instances: %d\n-- Scripts: %d\n\n"):format(
         gameName, os.date("%Y-%m-%d %H:%M:%S"), results.scanned, results.scripts
@@ -221,6 +219,7 @@ local function saveDump(results, gameName)
     pc(gwritefile, treePath, treeHeader .. results.tree)
     saved[#saved + 1] = treePath
 
+    -- index
     local idxPath = base .. "/_scripts_index.txt"
     local idxLines = {}
     for _, s in ipairs(results.scriptList) do
@@ -231,6 +230,7 @@ local function saveDump(results, gameName)
     pc(gwritefile, idxPath, table.concat(idxLines, "\n"))
     saved[#saved + 1] = idxPath
 
+    -- script files
     if #results.scriptList > 0 then
         local scrDir = base .. "/scripts"
         pc(gmakefolder, scrDir)
@@ -255,6 +255,7 @@ local function saveDump(results, gameName)
         end
     end
 
+    -- summary
     local sumPath = base .. "/_summary.txt"
     local sum = ("GameDumper Summary\n==================\nGame: %s\nPlaceId: %s\nDate: %s\nInstances: %d\nScripts: %d\nErrors: %d\nFiles: %d\n\nFiles:\n%s"):format(
         gameName,
@@ -268,21 +269,178 @@ local function saveDump(results, gameName)
     )
     pc(gwritefile, sumPath, sum)
     saved[#saved + 1] = sumPath
+
     return { base = base, files = saved, summary = sumPath }
 end
 
 -- ============================================================
--- REMOTE SPY (เหมือนเดิม)
+-- REMOTE SPY (light)
 -- ============================================================
--- ... (ไม่เปลี่ยนแปลง) ...
+local Spy = {
+    enabled = false,
+    log = {},
+    entries = {},
+    maxEntries = 2000,
+    hooked = {},
+    nameCache = {},
+}
+
+local function remotePath(r)
+    local cached = Spy.nameCache[r]
+    if cached then return cached end
+    local p = pc(function() return r.Name end) or "?"
+    local parent = pc(function() return r.Parent end)
+    local hops = 0
+    while parent and parent ~= game and hops < 12 do
+        p = (pc(function() return parent.Name end) or "?") .. "." .. p
+        parent = pc(function() return parent.Parent end)
+        hops = hops + 1
+    end
+    Spy.nameCache[r] = p
+    return p
+end
+
+local function spyLog(kind, remote, args, rets)
+    if not Spy.enabled then return end
+    local path = remotePath(remote)
+    local line = ("[%s] %s %s"):format(os.date("%H:%M:%S"), kind, path)
+    if args and #args > 0 then
+        for i, a in ipairs(args) do
+            line = line .. ("\n  arg[%d] = %s"):format(i, fmtVal(a))
+        end
+    end
+    if rets and #rets > 0 then
+        for i, r in ipairs(rets) do
+            line = line .. ("\n  ret[%d] = %s"):format(i, fmtVal(r))
+        end
+    end
+    Spy.log[#Spy.log + 1] = line
+    Spy.entries[#Spy.entries + 1] = {
+        time = os.clock(), stamp = os.date("%H:%M:%S"),
+        kind = kind, path = path, args = args, returns = rets,
+    }
+    if #Spy.log > Spy.maxEntries then
+        table.remove(Spy.log, 1)
+        table.remove(Spy.entries, 1)
+    end
+end
+
+local function hookOne(remote)
+    if Spy.hooked[remote] then return end
+    Spy.hooked[remote] = true
+    local cn = pc(function() return remote.ClassName end)
+
+    if cn == "RemoteEvent" then
+        if remote.FireServer then
+            local orig = remote.FireServer
+            remote.FireServer = function(...)
+                local a = {...}
+                spyLog("FireServer", remote, a, nil)
+                return pc(orig, remote, unpack(a))
+            end
+        end
+        if remote.FireClient then
+            local orig = remote.FireClient
+            remote.FireClient = function(...)
+                local a = {...}
+                spyLog("FireClient", remote, a, nil)
+                return pc(orig, remote, unpack(a))
+            end
+        end
+    elseif cn == "RemoteFunction" then
+        if remote.InvokeServer then
+            local orig = remote.InvokeServer
+            remote.InvokeServer = function(...)
+                local a = {...}
+                local rets = {pc(orig, remote, unpack(a))}
+                spyLog("InvokeServer", remote, a, rets)
+                return unpack(rets)
+            end
+        end
+        if remote.InvokeClient then
+            local orig = remote.InvokeClient
+            remote.InvokeClient = function(...)
+                local a = {...}
+                local rets = {pc(orig, remote, unpack(a))}
+                spyLog("InvokeClient", remote, a, rets)
+                return unpack(rets)
+            end
+        end
+    end
+end
+
+local function scanRemotes(root, depth)
+    if depth > 6 then return end
+    local children = pc(function() return root:GetChildren() end)
+    if not children then return end
+    for _, child in ipairs(children) do
+        local cn = pc(function() return child.ClassName end)
+        if cn == "RemoteEvent" or cn == "RemoteFunction" then
+            hookOne(child)
+        end
+        scanRemotes(child, depth + 1)
+    end
+end
+
+local function startSpy()
+    Spy.enabled = true
+    local roots = {
+        pc(game.GetService, game, "ReplicatedStorage"),
+        pc(game.GetService, game, "ReplicatedFirst"),
+        pc(game.GetService, game, "Players"),
+        pc(game.GetService, game, "Workspace"),
+        pc(game.GetService, game, "StarterGui"),
+        pc(game.GetService, game, "StarterPack"),
+    }
+    for _, r in ipairs(roots) do
+        if r then
+            scanRemotes(r, 0)
+            local da = pc(function() return r.DescendantAdded end)
+            if da and da.Connect then
+                da:Connect(function(d)
+                    local cn = pc(function() return d.ClassName end)
+                    if cn == "RemoteEvent" or cn == "RemoteFunction" then
+                        hookOne(d)
+                    end
+                end)
+            end
+        end
+    end
+end
+
+local function stopSpy()
+    Spy.enabled = false
+end
+
+local function clearSpy()
+    Spy.log = {}
+    Spy.entries = {}
+end
+
+local function getSpyLog()
+    return table.concat(Spy.log, "\n")
+end
+
+local function saveSpyLog(basePath)
+    local log = getSpyLog()
+    if #log == 0 then return nil end
+    pc(gmakefolder, basePath)
+    local fp = basePath .. "/remote_spy.txt"
+    local hdr = ("-- Remote Spy Log\n-- Game: %s\n-- Entries: %d\n-- %s\n\n"):format(
+        pc(function() return game.Name end) or "?", #Spy.entries, os.date("%Y-%m-%d %H:%M:%S")
+    )
+    pc(gwritefile, fp, hdr .. log)
+    return fp
+end
 
 -- ============================================================
--- โหลด Rayfield แบบมี Timeout (ไม่เกิน 3 วิ)
+-- LOAD ORION LIBRARY (with timeout)
 -- ============================================================
-local function tryLoadRayfield()
+local function tryLoadOrion()
     local urls = {
-        "https://raw.githubusercontent.com/shlexware/Rayfield/main/source",
-        "https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/main/source",
+        "https://raw.githubusercontent.com/shlexware/Orion/main/source",
+        "https://raw.githubusercontent.com/Babyhamsta/Orion/main/source",
+        "https://raw.githubusercontent.com/tzechco/OrionLib/main/source",
     }
     for _, url in ipairs(urls) do
         local success, result
@@ -293,155 +451,200 @@ local function tryLoadRayfield()
         end)
         coroutine.resume(co)
         local t = os.clock()
-        while coroutine.status(co) ~= "dead" and os.clock() - t < 3 do
-            safeYield(0.05)
+        while coroutine.status(co) ~= "dead" and os.clock() - t < 5 do
+            safeYield(0.1)
         end
         if coroutine.status(co) ~= "dead" then
             coroutine.close(co)
         end
-        if success and result and type(result.CreateWindow) == "function" then
-            return result
+        if success and result and type(result) == "table" then
+            return result  -- Orion library table
         end
     end
     return nil
 end
 
 -- ============================================================
--- แจ้งเตือนผู้ใช้เมื่อไม่มี Rayfield
--- ============================================================
-local function showNotification(title, text, duration)
-    pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title = title,
-            Text = text,
-            Duration = duration or 5,
-        })
-    end)
-    print("[" .. title .. "] " .. text)
-end
-
--- ============================================================
--- เริ่มการดั๊มป์ (เรียกจาก UI หรือ _G.StartDump())
--- ============================================================
-local function startDumpInteractive(services)
-    local gameName = pc(function() return game.Name end) or "UnknownGame"
-    showNotification("Game Dumper", "กำลังสแกน...", 3)
-
-    local results = Dump.run(services, function(prog)
-        if prog.scanned % 500 == 0 then
-            print(("  [%d inst / %d scripts] %s"):format(prog.scanned, prog.scripts, prog.current))
-        end
-    end)
-
-    local save = saveDump(results, gameName)
-    showNotification("เสร็จสิ้น", ("สแกน %d instance / %d สคริปต์\nบันทึกที่ %s"):format(results.scanned, results.scripts, save.base), 8)
-    print("บันทึกที่: " .. save.base)
-end
-
--- ============================================================
--- MAIN
+-- MAIN UI WITH ORION
 -- ============================================================
 local function runUI()
-    local Rayfield = tryLoadRayfield()
+    local Orion = tryLoadOrion()
 
-    if not Rayfield then
-        -- ไม่มี Rayfield -> ใช้คอนโซล + ต้องพิมพ์ _G.StartDump() เพื่อเริ่ม
+    if not Orion then
+        -- Fallback: console mode
         print("══════════════════════════════════════")
         print("  GAME DUMPER — Console Mode")
         print("  เกม: " .. (pc(function() return game.Name end) or "?"))
         print("══════════════════════════════════════")
         print("")
-        print("❌ Rayfield UI ไม่พร้อมใช้งาน (หรือโหลดไม่ทัน)")
+        print("❌ Orion UI โหลดไม่สำเร็จ")
+        print("🔹 พิมพ์ _G.StartDump() เพื่อเริ่มสแกน")
+        print("   หรือ _G.StartDump({'Workspace','Players'}) เลือก Service เอง")
         print("")
-        print("🔹 พิมพ์ _G.StartDump() ในคอนโซลเพื่อเริ่มสแกน")
-        print("   หรือ _G.StartDump({'Workspace','Players'}) เพื่อเลือก Service เอง")
-        print("")
-        showNotification("Game Dumper", "พิมพ์ _G.StartDump() ในคอนโซลเพื่อเริ่ม", 10)
+        pcall(function()
+            game:GetService("StarterGui"):SetCore("SendNotification", {
+                Title = "Game Dumper",
+                Text = "พิมพ์ _G.StartDump() ในคอนโซลเพื่อเริ่ม",
+                Duration = 10,
+            })
+        end)
 
-        -- ฟังก์ชันให้ผู้ใช้เรียก
         _G.StartDump = function(services)
             local svc = services or CONFIG.services
-            startDumpInteractive(svc)
+            local gameName = pc(function() return game.Name end) or "UnknownGame"
+            local results = Dump.run(svc, function(prog)
+                if prog.scanned % 500 == 0 then
+                    print(("  [%d inst / %d scripts] %s"):format(prog.scanned, prog.scripts, prog.current))
+                end
+            end)
+            local save = saveDump(results, gameName)
+            print("✅ เสร็จ! " .. save.base .. " (" .. #save.files .. " files)")
+            print("📊 Instances: " .. results.scanned .. " | Scripts: " .. results.scripts)
         end
         return
     end
 
-    -- สร้าง UI ด้วย Rayfield
-    local Window = Rayfield:CreateWindow({
+    -- ============================================================
+    -- ORION UI BUILD
+    -- ============================================================
+    local Window = Orion:MakeWindow({
         Name = "Game Dumper",
-        LoadingTitle = "Game Dumper",
-        LoadingSubtitle = "Delta Ready",
-        ConfigurationSaving = { Enabled = false },
-        Discord = { Enabled = false },
-        KeySystem = false,
+        HidePremium = false,
+        SaveConfig = false,
+        ConfigFolder = "GameDumper",
+        IntroEnabled = true,
+        IntroText = "Game Dumper",
     })
 
-    local TabDump = Window:CreateTab("Dump")
-    local gameName = pc(function() return game.Name end) or "?"
-    TabDump:CreateLabel({ Name = "Game: " .. gameName })
+    local TabDump = Window:MakeTab({
+        Name = "Dump",
+        Icon = "rbxassetid://4483345998",
+        PremiumOnly = false,
+    })
 
+    local TabSpy = Window:MakeTab({
+        Name = "Remote Spy",
+        Icon = "rbxassetid://7733956259",
+        PremiumOnly = false,
+    })
+
+    -- Selected services (default: all on)
     local selectedSvc = {}
     for _, n in ipairs(CONFIG.services) do selectedSvc[n] = true end
 
-    TabDump:CreateButton({ Name = "All On", Callback = function()
-        for _, n in ipairs(CONFIG.services) do selectedSvc[n] = true end
-    end })
-    TabDump:CreateButton({ Name = "All Off", Callback = function()
-        for _, n in ipairs(CONFIG.services) do selectedSvc[n] = false end
-    end })
-    TabDump:CreateButton({ Name = "Core Only", Callback = function()
-        local core = { Workspace=true, ReplicatedStorage=true, Players=true, StarterGui=true, StarterPack=true, Lighting=true }
-        for _, n in ipairs(CONFIG.services) do selectedSvc[n] = core[n] or false end
-    end })
+    local gameName = pc(function() return game.Name end) or "?"
 
+    TabDump:AddLabel("🎮 Game: " .. gameName)
+    TabDump:AddLabel("───────────────")
+
+    -- Quick buttons
+    TabDump:AddButton({
+        Name = "All ON",
+        Callback = function()
+            for _, n in ipairs(CONFIG.services) do selectedSvc[n] = true end
+        end,
+    })
+
+    TabDump:AddButton({
+        Name = "All OFF",
+        Callback = function()
+            for _, n in ipairs(CONFIG.services) do selectedSvc[n] = false end
+        end,
+    })
+
+    TabDump:AddButton({
+        Name = "Core Only (WS+RS+PL+SG+SP)",
+        Callback = function()
+            local core = { Workspace=true, ReplicatedStorage=true, Players=true,
+                           StarterGui=true, StarterPack=true, Lighting=true }
+            for _, n in ipairs(CONFIG.services) do selectedSvc[n] = core[n] or false end
+        end,
+    })
+
+    TabDump:AddLabel("───────────────")
+    TabDump:AddLabel("Service Toggles:")
+
+    -- Toggles for each service
     for _, n in ipairs(CONFIG.services) do
-        TabDump:CreateToggle({
+        TabDump:AddToggle({
             Name = n,
-            CurrentValue = true,
+            Default = true,
             Callback = function(v) selectedSvc[n] = v end,
         })
     end
 
-    local dumpStatus = TabDump:CreateLabel({ Name = "Ready" })
+    TabDump:AddLabel("───────────────")
 
-    TabDump:CreateButton({
+    -- Status label
+    local dumpStatusLabel = TabDump:AddLabel("⏳ Ready")
+
+    -- START DUMP button
+    TabDump:AddButton({
         Name = "⚡ START DUMP",
         Callback = function()
-            if Dump.running then return end
+            if Dump.running then
+                Orion:MakeNotification({
+                    Name = "Game Dumper",
+                    Content = "Already scanning!",
+                    Time = 3,
+                })
+                return
+            end
+
             local toDump = {}
             for _, n in ipairs(CONFIG.services) do
                 if selectedSvc[n] then toDump[#toDump+1] = n end
             end
+
             if #toDump == 0 then
-                dumpStatus:Set({ Name = "No services selected!" })
+                Orion:MakeNotification({
+                    Name = "Game Dumper",
+                    Content = "Please select at least 1 service!",
+                    Time = 3,
+                })
                 return
             end
-            dumpStatus:Set({ Name = "Scanning..." })
-            Rayfield:Notify({ Title = "Dump", Content = "Starting...", Duration = 2, Image = 4483362458 })
 
-            -- ใช้ coroutine เพื่อไม่ให้ UI ค้าง
+            dumpStatusLabel:Set("🔍 Scanning... (0 inst)")
+
+            -- Run dump in coroutine
             local co = coroutine.create(function()
                 local results = Dump.run(toDump, function(prog)
-                    if prog.scanned % 500 == 0 then
-                        coroutine.yield(("Scanning: %d inst / %d scripts"):format(prog.scanned, prog.scripts))
+                    if prog.scanned % 200 == 0 then
+                        coroutine.yield(("🔍 Scanning... (%d inst / %d scripts)"):format(
+                            prog.scanned, prog.scripts
+                        ))
                     end
                 end)
-                if Dump.cancelled then return "Cancelled" end
+
+                if Dump.cancelled then
+                    return "❌ Cancelled"
+                end
+
                 local save = saveDump(results, gameName)
-                return ("Done: %d inst / %d scripts → %s"):format(results.scanned, results.scripts, save.base)
+                if Spy.enabled and #Spy.entries > 0 then
+                    saveSpyLog(save.base)
+                end
+
+                Orion:MakeNotification({
+                    Name = "Dump Complete ✅",
+                    Content = ("%d inst / %d scripts\nSaved: %s"):format(
+                        results.scanned, results.scripts, save.base
+                    ),
+                    Time = 8,
+                })
+                return ("✅ Done: %d inst / %d scripts"):format(results.scanned, results.scripts)
             end)
 
+            -- Poll coroutine without freezing UI
             local function poll()
                 local ok, msg = coroutine.resume(co)
                 if coroutine.status(co) == "dead" then
-                    if ok then
-                        dumpStatus:Set({ Name = msg or "Done" })
-                        Rayfield:Notify({ Title = "Dump Complete", Content = msg or "Done", Duration = 5, Image = 4483362458 })
-                    else
-                        dumpStatus:Set({ Name = "Error: " .. tostring(msg) })
-                    end
+                    dumpStatusLabel:Set(msg or "✅ Done")
                 else
-                    if ok and msg then dumpStatus:Set({ Name = msg }) end
+                    if ok and msg then
+                        dumpStatusLabel:Set(msg)
+                    end
                     safeYield(0.05)
                     poll()
                 end
@@ -450,18 +653,101 @@ local function runUI()
         end,
     })
 
-    TabDump:CreateButton({
+    -- CANCEL button
+    TabDump:AddButton({
         Name = "✕ CANCEL",
         Callback = function()
             Dump.cancelled = true
-            dumpStatus:Set({ Name = "Cancelling..." })
+            dumpStatusLabel:Set("⏹ Cancelling...")
+        end,
+    })
+    -- ============================================================
+    -- REMOTE SPY TAB
+    -- ============================================================
+    local spyStatusLabel = TabSpy:AddLabel("📡 Spy: OFF")
+    local spyCountLabel = TabSpy:AddLabel("📊 Captured: 0")
+
+    TabSpy:AddToggle({
+        Name = "Enable Remote Spy",
+        Default = false,
+        Callback = function(v)
+            if v then
+                startSpy()
+                spyStatusLabel:Set("📡 Spy: ● ACTIVE")
+            else
+                stopSpy()
+                spyStatusLabel:Set("📡 Spy: OFF")
+            end
         end,
     })
 
-    -- Remote Spy Tab (เหมือนเดิม) ...
-    -- (ใส่โค้ดเดิมของ Spy ตรงนี้)
+    TabSpy:AddButton({
+        Name = "Clear Log",
+        Callback = function()
+            clearSpy()
+            spyCountLabel:Set("📊 Captured: 0")
+        end,
+    })
 
-    Rayfield:Notify({ Title = "Game Dumper", Content = "Ready — " .. gameName, Duration = 3, Image = 4483362458 })
+    TabSpy:AddButton({
+        Name = "Save Spy Log",
+        Callback = function()
+            local base = CONFIG.saveRoot .. "/spy_" .. os.date("%Y%m%d_%H%M%S")
+            local fp = saveSpyLog(base)
+            if fp then
+                Orion:MakeNotification({
+                    Name = "Spy Saved",
+                    Content = fp,
+                    Time = 5,
+                })
+            else
+                Orion:MakeNotification({
+                    Name = "Spy",
+                    Content = "Nothing to save",
+                    Time = 3,
+                })
+            end
+        end,
+    })
+
+    local spyLogBox = TabSpy:AddTextbox({
+        Name = "Live Log",
+        Default = "Remote spy log will appear here...",
+        TextDisappear = false,
+        Callback = function() end,
+    })
+    -- Auto-refresh spy log
+    coroutine.wrap(function()
+        while true do
+            safeYield(1)
+            if Spy.enabled then
+                local log = getSpyLog()
+                if #log > 0 then
+                    local lines = Spy.log
+                    local start = math.max(1, #lines - 50)
+                    local disp = {}
+                    for i = start, #lines do disp[#disp+1] = lines[i] end
+                    spyLogBox:Set(table.concat(disp, "\n"))
+                else
+                    spyLogBox:Set("No remote calls captured yet.")
+                end
+                spyCountLabel:Set("📊 Captured: " .. #Spy.entries)
+            end
+        end
+    end)()
+
+    -- ============================================================
+    -- INIT COMPLETE
+    -- ============================================================
+    Orion:Init()
+    Orion:MakeNotification({
+        Name = "Game Dumper",
+        Content = "Ready — " .. gameName,
+        Time = 3,
+    })
 end
 
+-- ============================================================
+-- GO
+-- ============================================================
 runUI()
