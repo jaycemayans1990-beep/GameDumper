@@ -288,9 +288,9 @@ _G.GameDumperEngine = true
 print("[Dumper] Engine ready ✓")
 print("[Dumper] Now run Part 2 for UI")
 -- ============================================================
--- PART 2: Native Drawing UI - No download needed
+-- PART 2 (FIXED): ScreenGui UI - ไม่หาย, มองเห็นชัด
 -- ภาษา: Lua, เป้าหมาย: Delta Executor มือถือ
--- วิธีใช้: รัน Part 1 ก่อน แล้วรัน Part 2
+-- วิธีใช้: รัน Part 1 ก่อน แล้วรัน Part 2 (อันนี้)
 -- ============================================================
 
 if not _G.GameDumperEngine then
@@ -303,110 +303,163 @@ local Spy = _G.Spy
 local CONFIG = _G.CONFIG
 
 -- ============================================================
--- DRAWING LIBRARY UI (built-in, no http load)
+-- รอให้ PlayerGui โหลดก่อน
 -- ============================================================
-local Drawing = nil
-pcall(function()
-    Drawing = Drawing or getgenv().Drawing
-end)
+local player = game:GetService("Players").LocalPlayer
+if not player then
+    print("[UI] Player not found, waiting...")
+    repeat task.wait(0.5) until game:GetService("Players").LocalPlayer
+    player = game:GetService("Players").LocalPlayer
+end
 
-if not Drawing then
-    -- Drawing library ไม่มี -> fallback: ใช้ GUI จริง (ScreenGui)
-    print("[UI] Drawing not available, using ScreenGui fallback")
-    
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- ============================================================
+-- สร้าง UI
+-- ============================================================
+local function createUI()
     local gui = Instance.new("ScreenGui")
-    gui.Name = "GameDumper"
-    gui.Parent = game:GetService("CoreGui") or game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
-    
-    -- Main frame
+    gui.Name = "GameDumperGUI"
+    gui.ResetOnSpawn = false  -- สำคัญมาก ป้องกันหายตอนตาย
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.Parent = playerGui  -- ใช้ PlayerGui โดยตรง (แน่นอนกว่า CoreGui)
+
+    -- Main frame (ใหญ่ขึ้น, สีสว่าง)
     local main = Instance.new("Frame")
-    main.Size = UDim2.new(0, 300, 0, 400)
-    main.Position = UDim2.new(0.5, -150, 0.5, -200)
-    main.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    main.Size = UDim2.new(0, 320, 0, 480)
+    main.Position = UDim2.new(0.5, -160, 0.4, -240)  -- กึ่งกลางค่อนไปบน
+    main.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
     main.BorderSizePixel = 0
+    main.BorderColor3 = Color3.fromRGB(255, 80, 80)  -- ขอบแดงช่วยให้เห็น
     main.ClipsDescendants = true
     main.Parent = gui
-    
-    -- Title
+
+    -- ขอบ (ทำให้เห็นง่าย)
+    local border = Instance.new("UIStroke")
+    border.Thickness = 3
+    border.Color = Color3.fromRGB(255, 80, 80)
+    border.Parent = main
+
+    -- Title bar
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1, 0, 0, 45)
+    titleBar.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+    titleBar.BorderSizePixel = 0
+    titleBar.Parent = main
+
     local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, 0, 0, 40)
-    title.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+    title.Size = UDim2.new(1, -10, 1, 0)
+    title.Position = UDim2.new(0, 10, 0, 0)
+    title.BackgroundTransparency = 1
     title.TextColor3 = Color3.fromRGB(255, 255, 255)
     title.Text = "🎮 Game Dumper"
     title.Font = Enum.Font.GothamBold
     title.TextSize = 18
-    title.Parent = main
-    
-    -- Status
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = titleBar
+
+    -- Status label
     local status = Instance.new("TextLabel")
     status.Size = UDim2.new(1, -20, 0, 30)
-    status.Position = UDim2.new(0, 10, 0, 50)
+    status.Position = UDim2.new(0, 10, 0, 55)
     status.BackgroundTransparency = 1
-    status.TextColor3 = Color3.fromRGB(180, 180, 180)
-    status.Text = "Ready"
+    status.TextColor3 = Color3.fromRGB(200, 200, 200)
+    status.Text = "⏳ Ready"
     status.TextSize = 14
     status.TextXAlignment = Enum.TextXAlignment.Left
     status.Parent = main
-    
-    -- Buttons helper
-    local function makeButton(text, y, callback)
+
+    -- Helper to create button
+    local function createButton(text, y, color)
         local btn = Instance.new("TextButton")
         btn.Size = UDim2.new(1, -20, 0, 45)
         btn.Position = UDim2.new(0, 10, 0, y)
-        btn.BackgroundColor3 = Color3.fromRGB(60, 60, 220)
+        btn.BackgroundColor3 = color or Color3.fromRGB(60, 60, 220)
         btn.TextColor3 = Color3.fromRGB(255, 255, 255)
         btn.Text = text
         btn.Font = Enum.Font.GothamSemibold
         btn.TextSize = 14
         btn.BorderSizePixel = 0
+        btn.AutoButtonColor = true
         btn.Parent = main
-        
-        btn.MouseButton1Click:Connect(function()
-            pcall(callback)
-        end)
-        
         return btn
     end
-    
-    local yPos = 90
-    
-    -- Dump All button
-    makeButton("⚡ DUMP ALL", yPos, function()
+
+    local yPos = 95
+    local dumpAllBtn = createButton("⚡ DUMP ALL", yPos, Color3.fromRGB(40, 160, 40))
+    yPos = yPos + 55
+
+    local scriptsBtn = createButton("📜 SCRIPTS ONLY", yPos, Color3.fromRGB(160, 100, 40))
+    yPos = yPos + 55
+
+    local spyBtn = createButton("📡 SPY: OFF", yPos, Color3.fromRGB(60, 60, 220))
+    yPos = yPos + 55
+
+    local cancelBtn = createButton("✕ CANCEL", yPos, Color3.fromRGB(180, 40, 40))
+    yPos = yPos + 55
+
+    -- Log area
+    local logLabel = Instance.new("TextLabel")
+    logLabel.Size = UDim2.new(1, -20, 0, 20)
+    logLabel.Position = UDim2.new(0, 10, 0, yPos)
+    logLabel.BackgroundTransparency = 1
+    logLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
+    logLabel.Text = "Spy Log:"
+    logLabel.TextSize = 12
+    logLabel.TextXAlignment = Enum.TextXAlignment.Left
+    logLabel.Parent = main
+
+    local logFrame = Instance.new("ScrollingFrame")
+    logFrame.Size = UDim2.new(1, -20, 0, 150)
+    logFrame.Position = UDim2.new(0, 10, 0, yPos + 25)
+    logFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    logFrame.BorderSizePixel = 0
+    logFrame.CanvasSize = UDim2.new(0, 0, 0, 200)
+    logFrame.ScrollBarThickness = 8
+    logFrame.Parent = main
+
+    local logText = Instance.new("TextLabel")
+    logText.Size = UDim2.new(1, 0, 0, 200)
+    logText.BackgroundTransparency = 1
+    logText.TextColor3 = Color3.fromRGB(200, 200, 200)
+    logText.Text = "No spy calls yet"
+    logText.TextSize = 10
+    logText.TextXAlignment = Enum.TextXAlignment.Left
+    logText.TextYAlignment = Enum.TextYAlignment.Top
+    logText.TextWrapped = true
+    logText.Parent = logFrame
+
+    -- ============================================================
+    -- BUTTON LOGIC
+    -- ============================================================
+    dumpAllBtn.MouseButton1Click:Connect(function()
         if Dumper.running then return end
-        status.Text = "Scanning..."
-        
+        status.Text = "🔍 Scanning all services..."
         coroutine.wrap(function()
             local svcs = {}
             for _, s in ipairs(CONFIG.services) do svcs[#svcs+1] = s end
             local results = Dumper.scan(svcs)
-            local save = Dumper.save(results, 
-                pcall(function() return game.Name end) and game.Name or "Game")
-            status.Text = string.format("Done! %d inst, %d scripts", 
-                results.scanned, results.scripts)
+            local save = Dumper.save(results, pcall(function() return game.Name end) and game.Name or "Game")
+            status.Text = string.format("✅ %d inst, %d scripts", results.scanned, results.scripts)
         end)()
     end)
-    yPos = yPos + 55
-    
-    -- Dump Scripts Only
-    makeButton("📜 SCRIPTS ONLY", yPos, function()
+
+    scriptsBtn.MouseButton1Click:Connect(function()
         if Dumper.running then return end
-        status.Text = "Scanning scripts..."
-        
+        status.Text = "🔍 Scanning scripts only..."
         coroutine.wrap(function()
+            local oldDepth = CONFIG.depthLimit
             CONFIG.depthLimit = 6
             local svcs = {}
             for _, s in ipairs(CONFIG.services) do svcs[#svcs+1] = s end
             local results = Dumper.scan(svcs)
-            CONFIG.depthLimit = 10
-            local save = Dumper.save(results, 
-                pcall(function() return game.Name end) and game.Name or "Game_scripts")
-            status.Text = string.format("Done! %d scripts", results.scripts)
+            CONFIG.depthLimit = oldDepth
+            local save = Dumper.save(results, pcall(function() return game.Name end) and game.Name .. "_scripts" or "Game_scripts")
+            status.Text = string.format("✅ %d scripts", results.scripts)
         end)()
     end)
-    yPos = yPos + 55
-    
-    -- Spy Toggle
-    local spyBtn = makeButton("📡 SPY: OFF", yPos, function()
+
+    spyBtn.MouseButton1Click:Connect(function()
         if Spy.active then
             Spy.stop()
             spyBtn.Text = "📡 SPY: OFF"
@@ -415,95 +468,81 @@ if not Drawing then
         else
             Spy.start()
             spyBtn.Text = "📡 SPY: ON"
-            spyBtn.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
+            spyBtn.BackgroundColor3 = Color3.fromRGB(220, 40, 40)
             status.Text = "Spy active"
         end
     end)
-    yPos = yPos + 55
-    
-    -- Cancel
-    makeButton("✕ CANCEL", yPos, function()
+
+    cancelBtn.MouseButton1Click:Connect(function()
         Dumper.cancelled = true
-        status.Text = "Cancelled"
+        status.Text = "⏹ Cancelled"
     end)
-    
-    -- Log area
-    local logArea = Instance.new("ScrollingFrame")
-    logArea.Size = UDim2.new(1, -20, 0, 120)
-    logArea.Position = UDim2.new(0, 10, 0, yPos + 55)
-    logArea.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
-    logArea.BorderSizePixel = 0
-    logArea.CanvasSize = UDim2.new(0, 0, 0, 200)
-    logArea.Parent = main
-    
-    local logText = Instance.new("TextLabel")
-    logText.Size = UDim2.new(1, 0, 0, 200)
-    logText.BackgroundTransparency = 1
-    logText.TextColor3 = Color3.fromRGB(200, 200, 200)
-    logText.Text = "Spy log will show here..."
-    logText.TextSize = 10
-    logText.TextXAlignment = Enum.TextXAlignment.Left
-    logText.TextYAlignment = Enum.TextYAlignment.Top
-    logText.TextWrapped = true
-    logText.Parent = logArea
-    
-    -- Update log periodically
-    coroutine.wrap(function()
-        while gui.Parent do
-            wait(2)
-            if Spy.active then
-                logText.Text = Spy.getLog()
-                logArea.CanvasSize = UDim2.new(0, 0, 0, math.max(200, #Spy.getLog() * 0.5))
-            end
-        end
-    end)()
-    
-    -- Make draggable
-    local dragging, dragStart, startPos = false
-    title.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch then
+
+    -- ============================================================
+    -- DRAG FUNCTIONALITY (Touch + Mouse)
+    -- ============================================================
+    local dragging, dragStart, startPos
+    local function startDrag(input)
+        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = true
             dragStart = input.Position
             startPos = main.Position
         end
-    end)
-    title.InputEnded:Connect(function(input)
+    end
+    local function endDrag()
         dragging = false
-    end)
-    title.InputChanged:Connect(function(input)
-        if dragging and input.UserInputType == Enum.UserInputType.Touch then
+    end
+    local function updateDrag(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
             local delta = input.Position - dragStart
-            main.Position = UDim2.new(
-                startPos.X.Scale, startPos.X.Offset + delta.X,
-                startPos.Y.Scale, startPos.Y.Offset + delta.Y
-            )
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
-    end)
-    
-    print("[UI] ScreenGui loaded ✓")
-    print("[UI] ✋ Drag the window by its title bar")
-    print("[UI] 👆 Tap buttons to use")
-    
-else
-    -- Drawing library available (fallback ไม่ได้ใช้ แต่แจ้งไว้)
-    print("[UI] Drawing available but using ScreenGui for touch support")
+    end
+
+    titleBar.InputBegan:Connect(startDrag)
+    titleBar.InputEnded:Connect(endDrag)
+    titleBar.InputChanged:Connect(updateDrag)
+
+    -- ============================================================
+    -- LOG UPDATER (จะหยุดถ้า gui ถูกทำลาย)
+    -- ============================================================
+    coroutine.wrap(function()
+        while gui and gui.Parent do
+            task.wait(1)
+            if Spy.active then
+                logText.Text = Spy.getLog()
+                logFrame.CanvasSize = UDim2.new(0, 0, 0, math.max(200, #Spy.getLog() * 0.5))
+            end
+        end
+    end)()
+
+    return gui
 end
 
 -- ============================================================
--- NOTIFICATION
+-- สร้าง UI + ป้องกันการหาย
 -- ============================================================
-pcall(function()
-    game:GetService("StarterGui"):SetCore("SendNotification", {
-        Title = "Game Dumper",
-        Text = "UI Ready! 👆 Drag window & tap buttons",
-        Duration = 6,
-    })
-end)
+local gui = createUI()
 
-print("")
-print("══════════════════════")
-print(" UI Loaded Successfully")
-print(" 1. Drag window by title")
-print(" 2. Tap DUMP ALL to start")
-print(" 3. Tap SPY to monitor remotes")
-print("══════════════════════")
+if gui then
+    print("[UI] Created! Drag by title bar.")
+    -- แจ้งเตือนอีกครั้ง (บางทีอันเก่าไม่โผล่)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "Game Dumper",
+            Text = "UI พร้อมแล้ว! ลากแถบสีม่วง",
+            Duration = 8,
+        })
+    end)
+else
+    print("[UI] Failed to create!")
+end
+
+-- ============================================================
+-- ** สำคัญ: ห้ามสคริปต์หยุด **
+-- ถ้าสคริปต์จบ → ScreenGui จะถูกทำลาย
+-- ============================================================
+print("[UI] Keeping script alive...")
+while true do
+    task.wait(10)
+end
